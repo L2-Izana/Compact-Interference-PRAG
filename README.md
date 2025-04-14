@@ -7,6 +7,7 @@
 
 ![Overall Analysis](assets/overall.png)
 
+![Overall Analysis](assets/ParametricRAG.gif)
 
 
 ## Overview
