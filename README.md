@@ -1,6 +1,6 @@
 # Parametric RAG
 
-📢 News: this work has been accepted at the SIGIR 2025!
+📢 **News: this work has been accepted at the SIGIR 2025!**
 
 
 
