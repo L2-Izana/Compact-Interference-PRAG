@@ -80,3 +80,34 @@ def get_prompt(tokenizer, question, passages=None, answer=None, with_cot=False):
         add_generation_prompt=True)
     inputs += tokenizer.encode(assistant_content, add_special_tokens=False)
     return inputs
+
+
+def build_training_sample(question, passages=None, answer=None, with_cot=False):
+    question, passages, answer = _get_prompt(question, passages, answer)
+    
+    contexts = ""
+    if passages:
+        for pid, psg in enumerate(passages):
+            contexts += f"Passage {pid+1}: {psg}\n"
+
+    if not with_cot:
+        user_content = USER_PROMPT.format(question=question, passages=contexts)
+        assistant_content = ASSISTANT_PROMPT.format(answer=answer)
+    else:
+        assert fewshot is not None
+        user_content = USER_PROMPT_WITH_COT.format(
+            question=question, 
+            passages=contexts,
+            fewshot=fewshot
+        )
+        assistant_content = ASSISTANT_PROMPT_WITH_COT.format(answer=answer)
+
+    # Standard OpenAI-like supervised training format
+    sample = {
+        "messages": [
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": assistant_content}
+        ]
+    }
+
+    return sample

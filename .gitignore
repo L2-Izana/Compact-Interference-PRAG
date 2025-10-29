@@ -1,7 +1,9 @@
 bashfiles/
 log_error/
 log_output/
-
+output/
+model_checkpoints/
+*.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
