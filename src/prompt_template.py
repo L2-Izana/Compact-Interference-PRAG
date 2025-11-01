@@ -74,10 +74,11 @@ def get_prompt(tokenizer, question, passages=None, answer=None, with_cot=False):
         "role": "user",
         "content": user_content,
     }]
-
+    # print(messages)
     inputs = tokenizer.apply_chat_template(
         messages, 
         add_generation_prompt=True)
+    # print("After applying chat template:", inputs)
     inputs += tokenizer.encode(assistant_content, add_special_tokens=False)
     return inputs
 
