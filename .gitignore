@@ -3,6 +3,7 @@ log_error/
 log_output/
 output/
 model_checkpoints/
+please_first_test/
 *.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
