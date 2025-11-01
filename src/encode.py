@@ -132,6 +132,7 @@ def train_loraxs(question, augments, args, model, tokenizer, save_path):
         collate_fn=TrainingDataCollator(tokenizer, model.device),
         shuffle=False,
     )
+    print("Training data tokenization completed")
     model.is_parallelizable = True
     model.model_parallel = True
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
@@ -145,6 +146,7 @@ def train_loraxs(question, augments, args, model, tokenizer, save_path):
             optimizer.step()
     os.makedirs(save_path, exist_ok=True)
     model.save_pretrained(save_path)
+    print(f"Training completed, saving to {save_path}")
     model = model.unload()
     torch.cuda.empty_cache()
     gc.collect()
