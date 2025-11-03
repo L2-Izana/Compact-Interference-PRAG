@@ -13,7 +13,7 @@ from typing import Dict, List
 from lora_xs.utils.initialization_utils import find_and_initialize
 import prompt_template
 from root_dir_path import ROOT_DIR
-from utils import get_model, load_data
+from utils import get_model, load_data, model_generate
 
 import numpy as np
 import random
@@ -123,7 +123,7 @@ def train(question, augments, args, model, tokenizer,
     gc.collect()
     return model
 
-def train_loraxs(question, augments, args, model, tokenizer, save_path):
+def train_loraxs(question, augments, args, model, tokenizer, save_path, config=None):
     prompt_ids = get_train_data(args.augment_model, augments, tokenizer, args)
     train_data = TrainingData(prompt_ids, tokenizer)
     train_dataloader = torch.utils.data.DataLoader(
@@ -144,6 +144,15 @@ def train_loraxs(question, augments, args, model, tokenizer, save_path):
             loss = outputs.loss
             loss.backward()
             optimizer.step()
+        # model.eval()
+        # print(f"\nModel output after epoch {epoch+1}:")
+        # try:
+        #     answer = model_generate(question, model, tokenizer, config)
+        # except Exception as e:
+        #     print(f"[Warning] model_generate failed: {e}")
+        #     continue
+        # print(f"Q: {question}\nA: {answer}\n{'-'*60}")
+
     os.makedirs(save_path, exist_ok=True)
     model.save_pretrained(save_path)
     print(f"Training completed, saving to {save_path}")
@@ -262,7 +271,7 @@ def main(args):
                     model.print_trainable_parameters()
                     tokenizer.pad_token_id = tokenizer.eos_token_id
 
-                    model = train_loraxs(data["question"], [augment[pid]], args, model, tokenizer, save_path)
+                    model = train_loraxs(data["question"], [augment[pid]], args, model, tokenizer, save_path, config=_generation_config)
 
 
 if __name__ == "__main__":
