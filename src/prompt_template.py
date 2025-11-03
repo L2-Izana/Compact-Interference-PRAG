@@ -17,8 +17,8 @@ Here are some reference.\n\
 Let's think step by step. Answer the questions in the same format as above.\n\
 Question: {question}"
 
-ASSISTANT_PROMPT = "The answer is {answer}"
-ASSISTANT_PROMPT_WITH_COT = "Answer: {answer}"
+ASSISTANT_PROMPT = "{answer}" #TODO: Make it more strict?
+ASSISTANT_PROMPT_WITH_COT = "{answer}" #TODO: Make it more strict?
 
 def _get_prompt(question, passages=None, answer=None):
     question = question.strip()
