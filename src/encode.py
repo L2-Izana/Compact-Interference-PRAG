@@ -257,13 +257,14 @@ def main(args):
                     adapter_name = "default"
                     peft_config_dict = {adapter_name: peft_config}
 
-                    with open("/home/doluk/Compact-Interference-PRAG/src/lora_xs/config/reconstruct_config.yaml", 'r') as stream:
+                    with open(f"/home/doluk/Compact-Interference-PRAG/src/lora_xs/config/reconstruct_config.yaml", 'r') as stream:
                         reconstr_config = yaml.load(stream, Loader=yaml.FullLoader)
+                    decomposed_matrix_path = os.path.join(ROOT_DIR, "offline_loraxs", args.model_name, f"rank={args.lora_rank}", "svd_adapters.pt")
                     reconstr_type = reconstr_config['reconstruction_type']
                     reconstr_config[reconstr_type]['rank'] = peft_config_dict[adapter_name].r
 
                     find_and_initialize(model, peft_config_dict, adapter_name=adapter_name, reconstr_type=reconstr_type,
-                        writer=None, reconstruct_config=reconstr_config)
+                        writer=None, reconstruct_config=reconstr_config, decomposed_matrix_path=decomposed_matrix_path)
 
                     for param in model.parameters():
                         param.data = param.data.contiguous()
