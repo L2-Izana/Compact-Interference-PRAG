@@ -66,7 +66,7 @@ def main(args):
                 pred = {
                     "test_id": test_id, 
                     "question": question, 
-                    "answer": answer, 
+                    "answer": answer,   
                     "text": text,
                 }
                 pred.update(evaluate(text, answer, args.with_cot))
