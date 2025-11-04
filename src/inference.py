@@ -9,7 +9,10 @@ from peft import PeftModel
 import prompt_template
 from root_dir_path import ROOT_DIR
 from utils import get_model, evaluate, predict, load_data, read_complete
-
+from transformers.utils import logging
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+logging.set_verbosity_error()
 def main(args):
     data_list = load_data(args.dataset, args.data_type, args.augment_model)
     model, tokenizer, generation_config = get_model(
