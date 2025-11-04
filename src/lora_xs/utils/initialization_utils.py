@@ -148,7 +148,7 @@ def find_and_initialize(model, peft_config, adapter_name, reconstr_type, reconst
         os.makedirs(os.path.dirname(decomposed_matrix_path), exist_ok=True)
         torch.save(target_module_weight, decomposed_matrix_path)    
 
-def find_and_fill_trained_weights(model, peft_config, decomposed_matrix_path, trained_weights):
+def fill_trained_passage_adapter(model, peft_config, decomposed_matrix_path, trained_weights):
     """
     :param adapter_name: options: 'default'
     :param reconstr_type: options: 'svd'
@@ -179,6 +179,77 @@ def find_and_fill_trained_weights(model, peft_config, decomposed_matrix_path, tr
             # print(f"trained_latent_weight shape: {trained_latent_weight.shape}, replacement_encoder_weight shape: {replacement_encoder_weight.shape}, replacement_decoder_weight shape: {replacement_decoder_weight.shape}, trained_decoder_weight shape: {trained_decoder_weight.shape}, trained_encoder_weight shape: {trained_encoder_weight.shape}")
             assert (trained_decoder_weight == replacement_decoder_weight.T).all(), "Trained decoder weight shape does not match replacement decoder weight as this is frozen"
             assert (trained_encoder_weight == replacement_encoder_weight.T).all(), "Trained encoder weight shape does not match replacement encoder weight as this is frozen"
+            # exit("Debugging stop")
+            if not isinstance(target, peft.tuners.lora.Linear):
+                raise NotImplementedError('Only initialization for peft.tuners.lora.Linear type is implemented.')
+                # TODO implement for Linear8bitLt
+            else:
+                replace_module_weights(target.lora_B.default, replacement_decoder_weight.T)
+                target.forward = types.MethodType(forward_latent, target)
+                target.get_delta_weight = types.MethodType(get_delta_weight, target)
+                replace_module_weights(target.lora_A.default, replacement_encoder_weight.T)
+                target.default_lora_latent_mapping = torch.nn.Linear(lora_config.r, lora_config.r, bias=False)
+                replace_module_weights(target.default_lora_latent_mapping, trained_latent_weight)
+                target.default_lora_latent_mapping.to(target.lora_A.default.weight.device)
+
+    if not is_target_modules_in_base_model:
+        raise ValueError(
+            f"Target modules {lora_config.target_modules} not found in the base model. "
+            f"Please check the target modules and try again."
+        )
+
+def fill_trained_data_adapters(model, peft_config, decomposed_matrix_path, data_adapter_dir):
+    """
+    :param adapter_name: options: 'default'
+    :param reconstr_type: options: 'svd'
+    """
+    passage_adapter_file = [os.path.join(data_adapter_dir, passage_adapter_dir, "adapter_model.safetensors") for passage_adapter_dir in os.listdir(data_adapter_dir)]
+    assert os.path.exists(decomposed_matrix_path), f"Decomposed matrix path {decomposed_matrix_path} does not exist, check again"
+    decomposed_target_module_weight = torch.load(decomposed_matrix_path)    
+    trained_weights = [load_file(trained_weights) for trained_weights in passage_adapter_file]
+
+    # Compute aggregated trained weights using MoE weighting
+    moe_weights = [1,1,1] # Equal weights for each passage adapter, TODO: Apply MoE weighting later
+    aggregated_trained_weights = dict()
+    for key in trained_weights[0].keys():
+        denominator = sum(moe_weights) # Use weighted sum for latent, else keep normal
+        aggregated_trained_weights[key] = sum([moe_weights[i] * trained_weights[i][key] for i in range(len(trained_weights))]) / denominator 
+    trained_weights = aggregated_trained_weights
+
+    lora_config = peft_config
+    is_target_modules_in_base_model = False
+    key_list = [key for key, _ in model.named_modules()]
+    assert (not isinstance(lora_config.target_modules, str))
+    print("Iterating through model's specified modules to initialize A/B matrices.")
+    
+    for key in tqdm(key_list):
+        target_module_found = any(key.endswith(target_key) for target_key in lora_config.target_modules)
+        if target_module_found:
+            if not is_target_modules_in_base_model:
+                is_target_modules_in_base_model = True
+            _, target, target_name = _get_submodules(model, key)
+            # print(f"Filling trained weights for module: {key} of type {type(target)}")
+            # exit("Debugging stop")
+            replacement_encoder_weight = decomposed_target_module_weight[key]["replacement_encoder_weight"]
+            replacement_decoder_weight = decomposed_target_module_weight[key]["replacement_decoder_weight"]
+            trained_latent_weight = trained_weights[f"{key}_lora_latent_mapping.weight"].to(replacement_encoder_weight.device)
+            trained_encoder_weight = trained_weights[f"{key}.lora_A.weight"].to(replacement_encoder_weight.device)
+            trained_decoder_weight = trained_weights[f"{key}.lora_B.weight"].to(replacement_decoder_weight.device)
+            # print(f"Device info - trained_encoder_weight device: {trained_encoder_weight.device}, replacement_encoder_weight device: {replacement_encoder_weight.device}, trained_decoder_weight device: {trained_decoder_weight.device}, replacement_decoder_weight device: {replacement_decoder_weight.device}, trained_latent_weight device: {trained_latent_weight.device}")
+            # print(f"trained_latent_weight shape: {trained_latent_weight.shape}, replacement_encoder_weight shape: {replacement_encoder_weight.shape}, replacement_decoder_weight shape: {replacement_decoder_weight.shape}, trained_decoder_weight shape: {trained_decoder_weight.shape}, trained_encoder_weight shape: {trained_encoder_weight.shape}")
+            # print((trained_decoder_weight - replacement_decoder_weight.T).flatten())
+            # print((trained_encoder_weight - replacement_encoder_weight.T).flatten())
+            assert torch.allclose(
+                trained_decoder_weight,
+                replacement_decoder_weight.T,
+                atol=1e-6, rtol=1e-5
+            ), "decoder mismatch"
+
+            assert torch.allclose(
+                trained_encoder_weight,
+                replacement_encoder_weight.T,
+                atol=1e-6, rtol=1e-5
+            ), "encoder mismatch"
             # exit("Debugging stop")
             if not isinstance(target, peft.tuners.lora.Linear):
                 raise NotImplementedError('Only initialization for peft.tuners.lora.Linear type is implemented.')
