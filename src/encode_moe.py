@@ -9,9 +9,6 @@ import torch.nn.functional as F
 from safetensors.torch import load_file
 from utils import model_generate
 
-# --------------------------------------------------------------------------------
-# Utilities: device helpers
-# --------------------------------------------------------------------------------
 FORCE_DEVICE = torch.device("cuda:0")
 
 def move_batch_to_device(batch: dict, device: torch.device) -> dict:
