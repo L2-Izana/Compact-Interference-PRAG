@@ -116,7 +116,8 @@ def create_cot():
     
     output_dataset = []
 
-    model_name = "llama3-8b-instruct"
+    # model_name = "llama3-8b-instruct"
+    model_name = "qwen2.5-7b-instruct" # Llamam is not accessible, use Qwen2.5 instead
     model, tokenizer, generation_config = get_model(model_name, max_new_tokens=128)
     model.eval()
 

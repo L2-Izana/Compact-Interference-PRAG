@@ -193,7 +193,8 @@ def elasticsearch_hit_template(self, es_res: Dict[str, object], hits: List[Tuple
 ElasticSearch.hit_template = elasticsearch_hit_template
 
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+# tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
 tokenizer.pad_token = tokenizer.eos_token
 bm25_retriever = BM25(
     tokenizer = tokenizer, 

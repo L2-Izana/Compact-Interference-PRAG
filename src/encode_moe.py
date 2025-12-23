@@ -1,3 +1,4 @@
+import argparse
 import os
 import json
 from pathlib import Path
@@ -20,9 +21,6 @@ def move_batch_to_device(batch: dict, device: torch.device) -> dict:
             out[k] = v
     return out
 
-# --------------------------------------------------------------------------------
-# MoE-LoRA block (A/B frozen, router trainable)
-# --------------------------------------------------------------------------------
 class MoELoRA(nn.Module):
     def __init__(self, in_dim, out_dim, trained_lora_A_weights, trained_lora_B_weights, r=None, alpha=32):
         """
@@ -68,7 +66,7 @@ class MoELoRA(nn.Module):
 
     def forward(self, x):
         router_logits = self.router(x)  # [..., num_heads]
-        router_scores = F.softmax(router_logits, dim=-1)
+        router_scores = self.num_heads * F.softmax(router_logits, dim=-1)
         expert_outs = [self.Bs[i](self.As[i](x)) for i in range(self.num_heads)]
         expert_outs = torch.stack(expert_outs, dim=-1)  # [..., out_dim, num_heads]
         return self.scaling * torch.sum(expert_outs * router_scores.unsqueeze(-2), dim=-1)
@@ -103,6 +101,39 @@ class MixtureLoRA(nn.Module):
     def forward(self, x):
         return self.scaling * self.B(self.mixture(self.A(x)))
 
+class MoESubspaceLoRA(nn.Module):
+    def __init__(self, in_dim, out_dim, trained_lora_A_weights, trained_lora_B_weights, r=2, alpha=32):
+        super().__init__()
+        self.num_heads = len(trained_lora_A_weights)
+        self.r = r
+        self.alpha = alpha
+        self.scaling = alpha / r
+
+        # load frozen A/B
+        self.A = nn.Linear(in_dim, r * self.num_heads, bias=False) 
+        self.B = nn.Linear(r * self.num_heads, out_dim, bias=False) 
+        
+        A_stacked = torch.cat(trained_lora_A_weights, dim=0)      # [r*num_heads, in_dim]
+        B_stacked = torch.cat(trained_lora_B_weights, dim=1)    # [out_dim, r*num_heads]
+        with torch.no_grad():
+            self.A.weight.copy_(A_stacked)
+            self.B.weight.copy_(B_stacked)
+
+        # trainable moe-subspace: maps input → (num_heads*r), instead of num_heads like in MoE
+        self.moe_subspace = nn.Linear(in_dim, self.num_heads * r)
+
+        # freeze A/B
+        for p in self.A.parameters(): p.requires_grad = False
+        for p in self.B.parameters(): p.requires_grad = False
+        # train mixture only
+        for p in self.moe_subspace.parameters(): p.requires_grad = True
+
+    def forward(self, x):   # x: [B, S, in_dim]
+        mixture_out = self.num_heads * F.softmax(self.moe_subspace(x), dim=-1)  # [B, S, num_heads*r] # scale by num_heads to keep magnitude
+        z = self.A(x)  # [B, S, num_heads*r]
+        row_wise_product = z * mixture_out  # [B, S, num_heads*r]
+        return self.scaling * self.B(row_wise_product)  # [B, S, out_dim]
+
 class MoEMixtureLoRA(nn.Module):
     def __init__(self, in_dim, out_dim, trained_lora_A_weights, trained_lora_B_weights, r=2, alpha=32):
         super().__init__()
@@ -122,18 +153,57 @@ class MoEMixtureLoRA(nn.Module):
             self.B.weight.copy_(B_stacked)
 
         # trainable mixture: maps (num_heads*r) → (num_heads*r)
-        self.mixture_moe = nn.Linear(in_dim, self.num_heads * r)
-
+        self.mixture = nn.Linear(self.num_heads * r, self.num_heads * r)
+        self.moe = nn.Linear(in_dim, self.num_heads)
+        
         # freeze A/B
         for p in self.A.parameters(): p.requires_grad = False
         for p in self.B.parameters(): p.requires_grad = False
         # train mixture only
-        for p in self.mixture_moe.parameters(): p.requires_grad = True
-
+        for p in self.moe.parameters(): p.requires_grad = True
+        for p in self.mixture.parameters(): p.requires_grad = True
+        
     def forward(self, x):   # x: [B, S, in_dim]
-        mixture_out = self.num_heads * F.softmax(self.mixture_moe(x), dim=-1)  # [B, S, num_heads*r] # scale by num_heads to keep magnitude
-        z = self.A(x)  # [B, S, num_heads*r]
-        row_wise_product = z * mixture_out  # [B, S, num_heads*r]
+        routings = self.num_heads * F.softmax(self.moe(x), dim=-1)  # [B, S, num_heads] # scale by num_heads to keep magnitude
+        z = self.mixture(self.A(x))  # [B, S, num_heads*r]
+        # This is MoE (not Subpsace Moe), so need to repeat routings for r dims
+        row_wise_routings = routings.unsqueeze(-1).repeat(1, 1, 1, self.r).view(*z.shape)  # [B, S, num_heads*r]
+        row_wise_product = z * row_wise_routings  # [B, S, num_heads*r]
+        return self.scaling * self.B(row_wise_product)  # [B, S, out_dim]
+
+class MoEMixtureSubspaceLoRA(nn.Module):
+    def __init__(self, in_dim, out_dim, trained_lora_A_weights, trained_lora_B_weights, r=2, alpha=32):
+        super().__init__()
+        self.num_heads = len(trained_lora_A_weights)
+        self.r = r
+        self.alpha = alpha
+        self.scaling = alpha / r
+
+        # load frozen A/B
+        self.A = nn.Linear(in_dim, r * self.num_heads, bias=False) 
+        self.B = nn.Linear(r * self.num_heads, out_dim, bias=False) 
+        
+        A_stacked = torch.cat(trained_lora_A_weights, dim=0)      # [r*num_heads, in_dim]
+        B_stacked = torch.cat(trained_lora_B_weights, dim=1)    # [out_dim, r*num_heads]
+        with torch.no_grad():
+            self.A.weight.copy_(A_stacked)
+            self.B.weight.copy_(B_stacked)
+
+        # trainable mixture: maps (num_heads*r) → (num_heads*r)
+        self.mixture = nn.Linear(self.num_heads * r, self.num_heads * r)
+        self.moe_subspace = nn.Linear(in_dim, self.num_heads * r)
+        
+        # freeze A/B
+        for p in self.A.parameters(): p.requires_grad = False
+        for p in self.B.parameters(): p.requires_grad = False
+        # train mixture only
+        for p in self.moe_subspace.parameters(): p.requires_grad = True
+        for p in self.mixture.parameters(): p.requires_grad = True
+        
+    def forward(self, x):   # x: [B, S, in_dim]
+        routings = self.num_heads * F.softmax(self.moe_subspace(x), dim=-1)  # [B, S, num_heads*r] # scale by num_heads to keep magnitude
+        z = self.mixture(self.A(x))  # [B, S, num_heads*r]
+        row_wise_product = z * routings  # [B, S, num_heads*r]
         return self.scaling * self.B(row_wise_product)  # [B, S, out_dim]
 
 class AdvancedMoEMixtureLoRA(nn.Module):
@@ -172,38 +242,38 @@ class AdvancedMoEMixtureLoRA(nn.Module):
         # y = z @ z_mixed  # [B, S, num_heads*r]
         return self.num_heads * self.scaling * self.B(z_mixed)  # [B, S, out_dim]
 
-class HydraMoEMixtureLoRA(nn.Module):
-    def __init__(self, in_dim, out_dim, trained_lora_A_weights, trained_lora_B_weights, r=2, alpha=32):
-        super().__init__()
-        self.num_heads = len(trained_lora_A_weights)
-        self.r = r
-        self.alpha = alpha
-        self.scaling = alpha / r
+# class HydraMoEMixtureLoRA(nn.Module):
+#     def __init__(self, in_dim, out_dim, trained_lora_A_weights, trained_lora_B_weights, r=2, alpha=32):
+#         super().__init__()
+#         self.num_heads = len(trained_lora_A_weights)
+#         self.r = r
+#         self.alpha = alpha
+#         self.scaling = alpha / r
 
-        # load frozen A/B
-        self.A = nn.Linear(in_dim, r, bias=False) 
-        self.B = nn.Linear(r * self.num_heads, out_dim, bias=False)        
+#         # load frozen A/B
+#         self.A = nn.Linear(in_dim, r, bias=False) 
+#         self.B = nn.Linear(r * self.num_heads, out_dim, bias=False)        
 
-        # A_avg = torch.mean(trained_lora_A_weights, dim=0)      # [r, in_dim]
-        B_stacked = torch.cat(trained_lora_B_weights, dim=1)    # [out_dim, r*num_heads]
-        with torch.no_grad():
-            self.A.weight.copy_(A_avg)
-            self.B.weight.copy_(B_stacked)
+#         # A_avg = torch.mean(trained_lora_A_weights, dim=0)      # [r, in_dim]
+#         B_stacked = torch.cat(trained_lora_B_weights, dim=1)    # [out_dim, r*num_heads]
+#         with torch.no_grad():
+#             self.A.weight.copy_(A_avg)
+#             self.B.weight.copy_(B_stacked)
 
-        # trainable mixture: maps (num_heads*r) → (num_heads*r)
-        self.mixture_moe = nn.Linear(in_dim, self.num_heads * r)
+#         # trainable mixture: maps (num_heads*r) → (num_heads*r)
+#         self.mixture_moe = nn.Linear(in_dim, self.num_heads * r)
 
-        # freeze A/B
-        for p in self.A.parameters(): p.requires_grad = True
-        for p in self.B.parameters(): p.requires_grad = False
-        # train mixture only
-        for p in self.mixture_moe.parameters(): p.requires_grad = True
+#         # freeze A/B
+#         for p in self.A.parameters(): p.requires_grad = True
+#         for p in self.B.parameters(): p.requires_grad = False
+#         # train mixture only
+#         for p in self.mixture_moe.parameters(): p.requires_grad = True
 
-    def forward(self, x):   # x: [B, S, in_dim]
-        mixture_out = F.softmax(self.mixture_moe(x), dim=-1) # [B, S, num_heads * r] 
-        z = self.A(x)  # [B, S, r]
-        mixture_out * self.B  # [B, S, out_dim]
-        return self.num_heads * self.scaling * sum(outs)  # [B, S, out_dim]
+#     def forward(self, x):   # x: [B, S, in_dim]
+#         mixture_out = F.softmax(self.mixture_moe(x), dim=-1) # [B, S, num_heads * r] 
+#         z = self.A(x)  # [B, S, r]
+#         mixture_out * self.B  # [B, S, out_dim]
+#         return self.num_heads * self.scaling * sum(outs)  # [B, S, out_dim]
 
 # --------------------------------------------------------------------------
 # Wrapper Linear (base frozen; inference-mode; add MoE delta)
@@ -310,7 +380,7 @@ def inject_hydra_lora_force_cuda0(model: nn.Module, trained_data_adapters_dir: s
             assert B.shape[0] == out_dim, f"{name} passage#{i} B shape {B.shape} incompatible with out_dim={out_dim}"
             assert A.shape[0] == B.shape[1], f"{name} passage#{i} r mismatch: {A.shape[0]} vs {B.shape[1]}"
 
-        if architecture == "moe_lora":
+        if architecture == "moe":
             moe = MoELoRA(
                 in_dim=in_dim,
                 out_dim=out_dim,
@@ -319,8 +389,17 @@ def inject_hydra_lora_force_cuda0(model: nn.Module, trained_data_adapters_dir: s
                 r=(A_list[0].shape[0] if r is None else r),
                 alpha=alpha,
             )
-        elif architecture == "mixture_lora":
+        elif architecture == "mixture":
             moe = MixtureLoRA(
+                in_dim=in_dim,
+                out_dim=out_dim,
+                trained_lora_A_weights=A_list,
+                trained_lora_B_weights=B_list,
+                r=(A_list[0].shape[0] if r is None else r),
+                alpha=alpha,
+            )
+        elif architecture == "moe_subspace":
+            moe = MoESubspaceLoRA(
                 in_dim=in_dim,
                 out_dim=out_dim,
                 trained_lora_A_weights=A_list,
@@ -337,9 +416,8 @@ def inject_hydra_lora_force_cuda0(model: nn.Module, trained_data_adapters_dir: s
                 r=(A_list[0].shape[0] if r is None else r),
                 alpha=alpha,
             )
-
-        elif architecture == "advanced_moe_mixture":
-            moe = AdvancedMoEMixtureLoRA(
+        elif architecture == "moe_mixture_subspace":
+            moe = MoEMixtureSubspaceLoRA(
                 in_dim=in_dim,
                 out_dim=out_dim,
                 trained_lora_A_weights=A_list,
@@ -347,6 +425,15 @@ def inject_hydra_lora_force_cuda0(model: nn.Module, trained_data_adapters_dir: s
                 r=(A_list[0].shape[0] if r is None else r),
                 alpha=alpha,
             )
+        # elif architecture == "advanced_moe_mixture":
+        #     moe = AdvancedMoEMixtureLoRA(
+        #         in_dim=in_dim,
+        #         out_dim=out_dim,
+        #         trained_lora_A_weights=A_list,
+        #         trained_lora_B_weights=B_list,
+        #         r=(A_list[0].shape[0] if r is None else r),
+        #         alpha=alpha,
+        #     )
         # Force MoE placement to cuda:0 (ignore shard)
         moe.to(device=FORCE_DEVICE, dtype=module.weight.dtype)
 
@@ -358,18 +445,18 @@ def inject_hydra_lora_force_cuda0(model: nn.Module, trained_data_adapters_dir: s
 
     if verbose:
         print(f"Done. Injected {injected} modules.")
+    print(f"[INFP] Total number of trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
 # --------------------------------------------------------------------------------
 # Training
 # --------------------------------------------------------------------------------
 def train(
+    args,
     question,
     augments,
     model,
     tokenizer,
-    config,
-    lr=3e-4,
-    epochs=10,
+    config
 ):
     import torch, os, json
     from encode import TrainingData, TrainingDataCollator
@@ -399,13 +486,13 @@ def train(
     # Model setup
     model.config.use_cache = False
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-    optimizer = torch.optim.AdamW(model_parameters, lr=lr)
+    optimizer = torch.optim.AdamW(model_parameters, lr=args.lr)
 
     # Training loop
-    for epoch in range(epochs):
+    for epoch in range(args.epochs):
         model.train()
         total_loss = 0.0
-        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+        pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
 
         for step, batch in enumerate(pbar):
             batch = move_batch_to_device(batch, torch.device("cuda:0"))
@@ -432,20 +519,25 @@ def train(
         # epoch_dir = os.path.join(save_path, f"epoch_{epoch+1}")
         # os.makedirs(epoch_dir, exist_ok=True)
         # model.save_pretrained(epoch_dir)
-
+    model.save_pretrained("/scratch/doluk/Compact-Interference-PRAG/temp_moe_adapter")  # <-- set your path
     return model
 
 # --------------------------------------------------------------------------------
 # Example main
 # --------------------------------------------------------------------------------
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--architecture", type=str, choices=["moe", "mixture", "moe_subspace", "moe_mixture", "moe_mixture_subspace"], default="moe_subspace")
+    ap.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
+    ap.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    args = ap.parse_args()
     # 1) Load your HF model (keep accelerate device map intact if used there)
     from utils import get_model  # your project helper
     model, tokenizer, config = get_model(model_name="qwen2.5-1.5b-instruct")
-
+    
     # 2) Inject adapters
     trained_adapter_dir = "/scratch/doluk/Compact-Interference-PRAG/offline/qwen2.5-1.5b-instruct/rank=2_alpha=32/popqa/lr=0.0003_epoch=2_direct/aug_model=qwen2.5-1.5b-instruct/total/data_0"  # <-- set your path
-    inject_hydra_lora_force_cuda0(model, trained_data_adapters_dir=trained_adapter_dir, alpha=32, target_modules=["gate_proj", "up_proj", "down_proj"], architecture="advanced_moe_mixture")
+    inject_hydra_lora_force_cuda0(model, trained_data_adapters_dir=trained_adapter_dir, alpha=32, target_modules=["gate_proj", "up_proj", "down_proj"], architecture=args.architecture)
     model.to(device=FORCE_DEVICE)
     # 3) Load aug data
     data_file = "/scratch/doluk/Compact-Interference-PRAG/data_aug/popqa/qwen2.5-1.5b-instruct/total.json"  # <-- set your path
@@ -455,5 +547,5 @@ if __name__ == "__main__":
 
     # 4) Train (router-only)
     torch.cuda.empty_cache()
-    model = train("What is George Rankin's occupation?", augments, model, tokenizer, config)
+    model = train(args, "What is George Rankin's occupation?", augments, model, tokenizer, config)
     # print(model_generate("What is George Rankin's occupation?", model, tokenizer, config))
