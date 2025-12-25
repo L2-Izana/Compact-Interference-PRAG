@@ -23,6 +23,7 @@ def main(args):
         prompt_template.get_fewshot(args.dataset)
     
     cot_name = "cot" if args.with_cot else "direct"
+    
     load_adapter_path = os.path.join(
         ROOT_DIR, 
         "offline", 

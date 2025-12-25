@@ -235,14 +235,14 @@ class AdvancedMoEMixtureLoRA(nn.Module):
 
     def forward(self, x):   # x: [B, S, in_dim]
         z = self.A(x)  # [B, S, num_heads*r]
-        M = self.mixture_moe(x)  # [B, S, (num_heads*r)*(num_heads*r)]
+        M = self.num_heads * self.mixture_moe(x)  # [B, S, (num_heads*r)*(num_heads*r)]
         M = M.view(*z.shape, self.num_heads * self.r)  # [B, S, num_heads*r, num_heads*r]
         z_mixed = torch.einsum('bsij,bsj->bsi', M, z)  # [B, S, num_heads*r]
         # mixture_out = self.num_heads * F.softmax(self.mixture_moe(x), dim=-1).view(-1, self.num_heads * self.r, self.num_heads * self.r)  # [B, S, num_heads*r, num_heads*r] # scale by num_heads to keep magnitude
         # y = z @ z_mixed  # [B, S, num_heads*r]
         return self.num_heads * self.scaling * self.B(z_mixed)  # [B, S, out_dim]
 
-# class HydraMoEMixtureLoRA(nn.Module):
+# class MixtureSubspaceLoRA(nn.Module):
 #     def __init__(self, in_dim, out_dim, trained_lora_A_weights, trained_lora_B_weights, r=2, alpha=32):
 #         super().__init__()
 #         self.num_heads = len(trained_lora_A_weights)
@@ -425,15 +425,15 @@ def inject_hydra_lora_force_cuda0(model: nn.Module, trained_data_adapters_dir: s
                 r=(A_list[0].shape[0] if r is None else r),
                 alpha=alpha,
             )
-        # elif architecture == "advanced_moe_mixture":
-        #     moe = AdvancedMoEMixtureLoRA(
-        #         in_dim=in_dim,
-        #         out_dim=out_dim,
-        #         trained_lora_A_weights=A_list,
-        #         trained_lora_B_weights=B_list,
-        #         r=(A_list[0].shape[0] if r is None else r),
-        #         alpha=alpha,
-        #     )
+        elif architecture == "advanced_moe_mixture":
+            moe = AdvancedMoEMixtureLoRA(
+                in_dim=in_dim,
+                out_dim=out_dim,
+                trained_lora_A_weights=A_list,
+                trained_lora_B_weights=B_list,
+                r=(A_list[0].shape[0] if r is None else r),
+                alpha=alpha,
+            )
         # Force MoE placement to cuda:0 (ignore shard)
         moe.to(device=FORCE_DEVICE, dtype=module.weight.dtype)
 
@@ -527,7 +527,7 @@ def train(
 # --------------------------------------------------------------------------------
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--architecture", type=str, choices=["moe", "mixture", "moe_subspace", "moe_mixture", "moe_mixture_subspace"], default="moe_subspace")
+    ap.add_argument("--architecture", type=str, choices=["moe", "mixture", "moe_subspace", "moe_mixture", "moe_mixture_subspace", "advanced_moe_mixture"], default="moe_subspace")
     ap.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     ap.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     args = ap.parse_args()
