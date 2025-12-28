@@ -6,6 +6,7 @@ import string
 import numpy as np
 from collections import Counter
 from typing import List, Union
+from safetensors.torch import save_file, load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from root_dir_path import ROOT_DIR
@@ -241,3 +242,4 @@ def predict(model, tokenizer, generation_config, question, with_cot, passages = 
     output = output.sequences[0][input_len:]
     text = tokenizer.decode(output, skip_special_tokens=True)
     return text
+
