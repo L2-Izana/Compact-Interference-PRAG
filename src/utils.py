@@ -241,5 +241,8 @@ def predict(model, tokenizer, generation_config, question, with_cot, passages = 
             **generation_config)
     output = output.sequences[0][input_len:]
     text = tokenizer.decode(output, skip_special_tokens=True)
+    prefix = "The answer is "
+    if text.startswith(prefix):
+        text = text[len(prefix):]
     return text
 

@@ -32,6 +32,8 @@ class MoELoRA(nn.Module):
         if r is None:
             r = inferred_r
         else:
+            logging.debug(f"trained_lora_A_weights shape: {trained_lora_A_weights[0].shape}")
+            logging.debug(f"trained_lora_B_weights shape: {trained_lora_B_weights[0].shape}")
             assert r == inferred_r, f"Provided r={r} != inferred r={inferred_r}"
 
         self.r = r
@@ -295,7 +297,7 @@ class LinearWithCustomLoRA(nn.Module):
 TARGET_MODULES = ["gate_proj", "up_proj", "down_proj"]
 
 
-def inject_hydra_lora(model: nn.Module, trained_data_adapters_dir: str, r: int = 2, alpha: int = 32, target_modules: List[str]=TARGET_MODULES, architecture="moe_mixture"):
+def inject_hydra_lora(model: nn.Module, trained_data_adapters_dir: str, r: None, alpha: int = 32, target_modules: List[str]=TARGET_MODULES, architecture="moe_mixture"):
     """
     Injects MoE-LoRA into all target Linear modules and places them on cuda:0.
     Assumes we will move the *entire model* to cuda:0 as well (see main).
@@ -422,7 +424,14 @@ def train(args, question, augments, model, tokenizer, config, save_path):
 
     # Model setup
     model.config.use_cache = False
-    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    if args.freeze_A:
+        logging.debug(f"Total number of trainable parameters before freezing: {sum([p.numel() for p in model.parameters() if p.requires_grad])}")
+        for name, param in model.named_parameters():
+            if "lora_A" in name:
+                param.requires_grad = False
+    model_parameters = [p for p in model.parameters() if p.requires_grad]
+    logging.debug(f"Total number of trainable parameters: {sum([p.numel() for p in model_parameters])}")
+    # model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     optimizer = torch.optim.AdamW(model_parameters, lr=args.learning_rate)
 
     # Training loop

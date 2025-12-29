@@ -7,6 +7,8 @@ please_first_test/
 *.json
 metrics_by_rank_epoch/
 authors.txt
+*.csv
+*.xlsx
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

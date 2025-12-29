@@ -5,25 +5,30 @@ import argparse
 import torch
 from tqdm import tqdm
 import warnings
-from transformers.utils import logging
+from transformers.utils import logging as hf_logging
 
 from moe_architecture import inject_hydra_lora, train
 import prompt_template
 from root_dir_path import ROOT_DIR
 from utils import get_model, evaluate, predict, load_data, read_complete
-logging.set_verbosity_error()
+hf_logging.set_verbosity_error()
 import logging
+def setup_logging(debug: bool, log_file: str = "app.log"):
+    level = logging.DEBUG if debug else logging.INFO
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.FileHandler("app.log"),
-        logging.StreamHandler()
+    handlers = [
+        logging.StreamHandler(),
+        logging.FileHandler(log_file),
     ]
-)
-logger = logging.getLogger(__name__)
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
+        force=True,  # critical for SLURM / re-runs
+    )
+
 warnings.filterwarnings(
     "ignore",
     message="`do_sample` is set to `False`.*",
@@ -39,7 +44,10 @@ def main(args):
     cot_name = "cot" if args.with_cot else "direct"
     output_root_dir = os.path.join(
         ROOT_DIR, 
-        "output",
+        "output" if not args.use_warmup else "warmup/output",
+        "freezeA" if args.freeze_A else "",
+        "warmup_cot" if args.with_cot_warmup else "",
+        f"warmup_epoch{args.warmup_epoch}" if args.warmup_epoch > 1 else "",
         f"{args.lora_architecture}",
         args.model_name, 
         f"rank={args.lora_rank}_alpha={args.lora_alpha}",
@@ -63,7 +71,7 @@ def main(args):
         ret, start_with = read_complete(predict_file)
 
         fulldata = fulldata[start_with:] if args.sample == -1 else fulldata[start_with:args.sample]
-        save_every = max(len(fulldata)//10, 1)
+        save_every = max(len(fulldata)//30, 1)
         for test_id, data in tqdm(enumerate(fulldata), total=len(fulldata)):
             model, tokenizer, generation_config = get_model(
                 args.model_name,
@@ -82,9 +90,6 @@ def main(args):
                 text = predict(model, tokenizer, generation_config, 
                                         question, with_cot=args.with_cot, 
                                         passages=psgs)
-                prefix = "The answer is "
-                if text.startswith(prefix):
-                    text = text[len(prefix):]
                 pred = {
                     "test_id": test_id, 
                     "question": question, 
@@ -99,7 +104,10 @@ def main(args):
             else:
                 trained_adapter_dir = os.path.join(
                     ROOT_DIR,
-                    "offline",
+                    "PRAG" if args.use_warmup else "", #Warmup is trained on PRAG subfolder 
+                    "offline" if not args.use_warmup else "warmup/offline",
+                    "warmup_cot" if args.with_cot_warmup else "",
+                    f"warmup_epoch{args.warmup_epoch}" if args.warmup_epoch > 1 else "",
                     args.model_name,
                     f"rank={args.lora_rank}_alpha={args.lora_alpha}",
                     args.dataset,
@@ -108,9 +116,10 @@ def main(args):
                     filename,
                     f"data_{test_id}",
                 )
+                logging.debug(f"Trained adapter dir: {trained_adapter_dir}")
                 assert os.path.exists(trained_adapter_dir), f"Trained adapter dir not found: {trained_adapter_dir}"
                   
-                inject_hydra_lora(model, trained_data_adapters_dir=trained_adapter_dir, alpha=args.lora_alpha, target_modules=TARGET_MODULES, architecture=args.lora_architecture)
+                inject_hydra_lora(model, trained_data_adapters_dir=trained_adapter_dir, r=args.lora_rank, alpha=args.lora_alpha, target_modules=TARGET_MODULES, architecture=args.lora_architecture)
                 torch.cuda.empty_cache()
                 logging.info(f"Start training for test_id {test_id}")
                 
@@ -150,26 +159,57 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
+    # ---- existing args ----
     parser.add_argument("--model_name", type=str, default="qwen2.5-1.5b-instruct")
     parser.add_argument("--max_new_tokens", type=int, default=20)
     parser.add_argument("--dataset", type=str, default="popqa")
     parser.add_argument("--data_type", type=str)
     parser.add_argument("--with_cot", action="store_true")
-    parser.add_argument("--sample", type=int, default=-1) # -1 means all
-    parser.add_argument("--augment_model", type=str, default=None)  
-    # Training args
+    parser.add_argument("--sample", type=int, default=-1)
+    parser.add_argument("--augment_model", type=str, default=None)
+
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
-    parser.add_argument("--num_train_epochs", type=int, required=True) # This one is encode part for LoRA
-    parser.add_argument("--num_post_train_epochs", type=int, required=True) # This one is posttraining for MoE
+    parser.add_argument("--num_train_epochs", type=int, required=True)
+    parser.add_argument("--num_post_train_epochs", type=int, required=True)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
-    parser.add_argument("--inference_method", type=str, required=True, choices=["icl", "prag", "combine"])
-    parser.add_argument("--lora_architecture", type=str, choices=["moe", "mixture", "moe_subspace", "moe_mixture", "moe_mixture_subspace", "advanced_moe_mixture"], default="moe_subspace")
-    # LoRA
+
+    parser.add_argument("--inference_method", type=str, required=True,
+                        choices=["icl", "prag", "combine"])
+
+    parser.add_argument("--lora_architecture", type=str,
+                        choices=[
+                            "moe", "mixture", "moe_subspace",
+                            "moe_mixture", "moe_mixture_subspace",
+                            "advanced_moe_mixture"
+                        ],
+                        default="moe")
+
     parser.add_argument("--lora_rank", type=int, default=2)
     parser.add_argument("--lora_alpha", type=int, default=32)
+
+    parser.add_argument("--use_warmup", action="store_true")
+    parser.add_argument("--freeze_A", action="store_true")
+    parser.add_argument("--warmup_epoch", type=int, default=1)
+    parser.add_argument("--with_cot_warmup", action="store_true")
+
+    # ---- logging args ----
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--log_file", type=str, default="logs/main.log")
+
     args = parser.parse_args()
+
+    setup_logging(debug=args.debug, log_file=args.log_file)
+
+    logger = logging.getLogger(__name__)
+    logger.info("Arguments: %s", vars(args))
+
     assert args.lora_rank and args.lora_alpha, "No Config for LoRA"
+
     if args.augment_model is None:
         args.augment_model = args.model_name
-    logging.info(args)
+
+    if (args.freeze_A or args.with_cot_warmup) and not args.use_warmup:
+        raise ValueError("Warmup settings require --use_warmup")
+
     main(args)
