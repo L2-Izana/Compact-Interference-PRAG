@@ -11,7 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from root_dir_path import ROOT_DIR
 from prompt_template import get_prompt
-
+import logging
 DATA_ROOT_DIR = os.path.join(ROOT_DIR, "data_aug")
 
 class BaseDataset:
@@ -246,3 +246,18 @@ def predict(model, tokenizer, generation_config, question, with_cot, passages = 
         text = text[len(prefix):]
     return text
 
+def setup_logging(debug: bool, log_file: str = "test.log"):
+    level = logging.DEBUG if debug else logging.INFO
+
+    handlers = [
+        logging.StreamHandler(),
+        logging.FileHandler(log_file),
+    ]
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
+        force=True,  
+    )

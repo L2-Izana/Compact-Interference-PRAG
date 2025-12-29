@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_file
 from moe_utils import load_injected_adapters, move_batch_to_device, save_injected_adapters, _collect_passage_paths, _find_weights_for_module, _load_all_adapter_states, _replace_module
-from utils import model_generate
+from utils import model_generate, setup_logging
 import logging
 
 
@@ -460,20 +460,19 @@ def train(args, question, augments, model, tokenizer, config, save_path):
             logger.warning(f"[Warning] model_generate failed: {e}")
             continue
         logger.debug(f"Q: {question}\nA: {answer}\n{'-'*60}")
-
-    save_path = os.path.join(save_path, f"{args.lora_architecture}", f"lr={args.learning_rate}_epoch={args.num_post_train_epochs}")
-    save_injected_adapters(
-        model,
-        save_path,
-        include_frozen_ab=False,  
-        extra_config={
-            "architecture": args.lora_architecture,
-            "alpha": 32,
-            "r": 2,
-            "target_modules": TARGET_MODULES,
-        },
-    )
-    logger.info(f"Saved trained adapters to {save_path}")
+        epoch_save_path = os.path.join(save_path, f"{args.lora_architecture}", f"lr={args.learning_rate}_epoch={epoch+1}")
+        logger.debug(f"Training done on epoch {epoch}, saving to {epoch_save_path}")    
+        save_injected_adapters(
+            model,
+            epoch_save_path,
+            include_frozen_ab=False,  
+            extra_config={
+                "architecture": args.lora_architecture,
+                "alpha": args.lora_alpha,
+                "r": args.lora_rank,
+                "target_modules": TARGET_MODULES,
+            },
+        )
     return model
 
 
@@ -482,17 +481,26 @@ def train(args, question, augments, model, tokenizer, config, save_path):
 # --------------------------------------------------------------------------------
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--architecture", type=str, choices=["moe", "mixture", "moe_subspace", "moe_mixture", "moe_mixture_subspace", "advanced_moe_mixture"], default="moe_subspace")
-    ap.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
-    ap.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    ap.add_argument("--lora_architecture", type=str, choices=["moe", "mixture", "moe_subspace", "moe_mixture", "moe_mixture_subspace", "advanced_moe_mixture"], default="moe")
+    ap.add_argument("--model_name", type=str, default="qwen2.5-1.5b-instruct")
+    ap.add_argument("--lora_rank", type=int, default=2)
+    ap.add_argument("--lora_alpha", type=int, default=32)
+    ap.add_argument("--num_post_train_epochs", type=int, default=10, help="Number of training epochs")
+    ap.add_argument("--learning_rate", type=float, default=3e-4, help="Learning rate")
+    ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--per_device_train_batch_size", type=int, default=1)
+    ap.add_argument("--freeze_A", action="store_true")
     args = ap.parse_args()
+    args.augment_model =  args.model_name
+    
     # 1) Load your HF model (keep accelerate device map intact if used there)
     from utils import get_model  # your project helper
     model, tokenizer, config = get_model(model_name="qwen2.5-1.5b-instruct")
     
     # 2) Inject adapters
-    trained_adapter_dir = "/scratch/doluk/Compact-Interference-PRAG/offline/qwen2.5-1.5b-instruct/rank=2_alpha=32/popqa/lr=0.0003_epoch=2_direct/aug_model=qwen2.5-1.5b-instruct/total/data_0"  # <-- set your path
-    inject_hydra_lora(model, trained_data_adapters_dir=trained_adapter_dir, alpha=32, target_modules=TARGET_MODULES, architecture=args.architecture)
+    trained_adapter_dir = f"/scratch/doluk/Compact-Interference-PRAG/offline/{args.model_name}/rank={args.lora_rank}_alpha=32/popqa/lr=0.0003_epoch=2_direct/aug_model=qwen2.5-1.5b-instruct/total/data_0"  # <-- set your path
+    inject_hydra_lora(model, trained_data_adapters_dir=trained_adapter_dir, r=args.lora_rank, alpha=32, target_modules=TARGET_MODULES, architecture=args.lora_architecture)
+    setup_logging(debug=args.debug)
     model.to(device=DEVICE)
     # 3) Load aug data
     data_file = "/scratch/doluk/Compact-Interference-PRAG/data_aug/popqa/qwen2.5-1.5b-instruct/total.json"  # <-- set your path
@@ -511,15 +519,16 @@ if __name__ == "__main__":
     inject_hydra_lora(
         model,
         trained_data_adapters_dir=trained_adapter_dir,
+        r=args.lora_rank,
         alpha=32,
         target_modules=TARGET_MODULES,
-        architecture=args.architecture,
+        architecture=args.lora_architecture,
     )
     model.to(device=DEVICE)
     model.eval()
 
     # 3) Load the trained router/mixture weights
-    load_injected_adapters(model, TESTING_SAVE_PATH, strict=False)
+    load_injected_adapters(model, os.path.join(TESTING_SAVE_PATH, args.lora_architecture,  f"lr={args.learning_rate}_epoch={args.num_post_train_epochs}"), strict=False)
 
     # 4) Run inference
     with torch.no_grad():

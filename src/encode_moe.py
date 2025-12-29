@@ -10,30 +10,24 @@ from transformers.utils import logging as hf_logging
 from moe_architecture import inject_hydra_lora, train
 import prompt_template
 from root_dir_path import ROOT_DIR
-from utils import get_model, evaluate, predict, load_data, read_complete
+from utils import get_model, evaluate, predict, load_data, read_complete, setup_logging
 hf_logging.set_verbosity_error()
 import logging
-def setup_logging(debug: bool, log_file: str = "app.log"):
-    level = logging.DEBUG if debug else logging.INFO
 
-    handlers = [
-        logging.StreamHandler(),
-        logging.FileHandler(log_file),
-    ]
-
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=handlers,
-        force=True,  # critical for SLURM / re-runs
-    )
 
 warnings.filterwarnings(
     "ignore",
     message="`do_sample` is set to `False`.*",
 )
 TARGET_MODULES = ["gate_proj", "up_proj", "down_proj"]
+
+def need_post_train(args, trained_adapter_dir):
+    for epoch in range(args.num_post_train_epochs):
+        epoch_save_path = os.path.join(trained_adapter_dir, f"{args.lora_architecture}", f"lr={args.learning_rate}_epoch={epoch+1}")
+        if not os.path.exists(epoch_save_path):    
+            return True
+    return False
+
 
 def main(args):
     data_list = load_data(args.dataset, args.data_type, args.augment_model)
@@ -42,120 +36,51 @@ def main(args):
         prompt_template.get_fewshot(args.dataset)
     
     cot_name = "cot" if args.with_cot else "direct"
-    output_root_dir = os.path.join(
-        ROOT_DIR, 
-        "output" if not args.use_warmup else "warmup/output",
-        "freezeA" if args.freeze_A else "",
-        "warmup_cot" if args.with_cot_warmup else "",
-        f"warmup_epoch{args.warmup_epoch}" if args.warmup_epoch > 1 else "",
-        f"{args.lora_architecture}",
-        args.model_name, 
-        f"rank={args.lora_rank}_alpha={args.lora_alpha}",
-        args.dataset,
-        f"lr={args.learning_rate}_epoch={args.num_train_epochs}_{cot_name}",
-        f"aug_model={args.augment_model}",
-        "post_train",
-        f"lr={args.learning_rate}_epoch={args.num_post_train_epochs}_{cot_name}",
-        args.inference_method, 
-    )
+
     for filename, fulldata in data_list:
         filename = filename.split(".")[0]
         logger.info(f"### Solving {filename} ###")
-        output_dir = os.path.join(output_root_dir, filename)
-        logger.info(f"Output directory: {output_dir}")
-        os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, "config.json"), "w") as fout:
-            json.dump(vars(args), fout, indent=4)
-
-        predict_file = os.path.join(output_dir, "predict.json")
-        ret, start_with = read_complete(predict_file)
-
-        fulldata = fulldata[start_with:] if args.sample == -1 else fulldata[start_with:args.sample]
-        save_every = max(len(fulldata)//30, 1)
-        for test_id, data in tqdm(enumerate(fulldata), total=len(fulldata)):
-            model, tokenizer, generation_config = get_model(
+        output_dir = os.path.join(
+                ROOT_DIR,
+                "PRAG" if args.use_warmup else "", 
+                "offline" if not args.use_warmup else "warmup/offline",
+                "warmup_cot" if args.with_cot_warmup else "",
+                f"warmup_epoch{args.warmup_epoch}" if args.warmup_epoch > 1 else "",
                 args.model_name,
-                max_new_tokens = args.max_new_tokens,
+                f"rank={args.lora_rank}_alpha={args.lora_alpha}",
+                args.dataset,
+                f"lr={args.learning_rate}_epoch={args.num_train_epochs}_{cot_name}",
+                f"aug_model={args.augment_model}",
+                filename
             )
-            augments = data["augment"]
 
-            test_id = test_id + start_with
-            assert test_id == len(ret), f"test_id {test_id} != len(ret) {len(ret)}"
+        fulldata = fulldata if args.sample == -1 else fulldata[:args.sample]
+        for did, data in tqdm(enumerate(fulldata), total=len(fulldata)):
+            augments = data["augment"]
 
             question = data["question"]
             passages = data["passages"]
             answer = data["answer"]
 
-            def get_pred(model, psgs):
-                text = predict(model, tokenizer, generation_config, 
-                                        question, with_cot=args.with_cot, 
-                                        passages=psgs)
-                pred = {
-                    "test_id": test_id, 
-                    "question": question, 
-                    "answer": answer, 
-                    "text": text,
-                }
-                pred.update(evaluate(text, answer, args.with_cot))
-                return pred
-
-            if args.inference_method == "icl":
-                ret.append(get_pred(model, psgs=passages))
-            else:
-                trained_adapter_dir = os.path.join(
-                    ROOT_DIR,
-                    "PRAG" if args.use_warmup else "", #Warmup is trained on PRAG subfolder 
-                    "offline" if not args.use_warmup else "warmup/offline",
-                    "warmup_cot" if args.with_cot_warmup else "",
-                    f"warmup_epoch{args.warmup_epoch}" if args.warmup_epoch > 1 else "",
+            trained_adapter_dir = os.path.join(
+                output_dir,
+                f"data_{did}",
+            )
+            logging.debug(f"Trained adapter dir: {trained_adapter_dir}")
+            assert os.path.exists(trained_adapter_dir), f"Trained adapter dir not found: {trained_adapter_dir}"
+            
+            if need_post_train(args, trained_adapter_dir=trained_adapter_dir):            
+                model, tokenizer, generation_config = get_model(
                     args.model_name,
-                    f"rank={args.lora_rank}_alpha={args.lora_alpha}",
-                    args.dataset,
-                    f"lr={args.learning_rate}_epoch={args.num_train_epochs}_{cot_name}",
-                    f"aug_model={args.augment_model}",
-                    filename,
-                    f"data_{test_id}",
+                    max_new_tokens = args.max_new_tokens,
                 )
-                logging.debug(f"Trained adapter dir: {trained_adapter_dir}")
-                assert os.path.exists(trained_adapter_dir), f"Trained adapter dir not found: {trained_adapter_dir}"
-                  
                 inject_hydra_lora(model, trained_data_adapters_dir=trained_adapter_dir, r=args.lora_rank, alpha=args.lora_alpha, target_modules=TARGET_MODULES, architecture=args.lora_architecture)
                 torch.cuda.empty_cache()
-                logging.info(f"Start training for test_id {test_id}")
+                logging.info(f"Start training for data {did}")
                 
                 train(args, question, augments, model, tokenizer, generation_config, save_path=trained_adapter_dir)
-
-                ret.append(get_pred(model, psgs=None))
-                torch.cuda.empty_cache()
-                gc.collect()
-            if (len(ret) % save_every) == 0:
-                with open(predict_file, "w") as fout:
-                    json.dump(ret, fout, indent=4)
-                metrics = ["em", "f1", "prec", "recall"]
-                ret_str = ""
-                for met in metrics:
-                    acc = sum(float(d[met]) for d in ret) / len(ret)
-                    acc = round(acc, 4)
-                    ret_str += f"{met}\t{acc}\n"
-                ret_str += "\n" + json.dumps(vars(args), indent=4)
-                with open(os.path.join(output_dir, "result.txt"), "w") as fout:
-                    fout.write(ret_str)
-
-
-        with open(predict_file, "w") as fout:
-            json.dump(ret, fout, indent=4)
-
-        ##### Evaluating #####
-        metrics = ["em", "f1", "prec", "recall"]
-        ret_str = ""
-        for met in metrics:
-            acc = sum(float(d[met]) for d in ret) / len(ret)
-            acc = round(acc, 4)
-            ret_str += f"{met}\t{acc}\n"
-        ret_str += "\n" + json.dumps(vars(args), indent=4)
-        with open(os.path.join(output_dir, "result.txt"), "w") as fout:
-            fout.write(ret_str)
-
+            else:
+                logging.info(f"This data {did} has already been trained for {args.num_post_train_epochs}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -174,8 +99,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_post_train_epochs", type=int, required=True)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
 
-    parser.add_argument("--inference_method", type=str, required=True,
-                        choices=["icl", "prag", "combine"])
+    # parser.add_argument("--inference_method", type=str, required=True, choices=["icl", "prag", "combine"])
 
     parser.add_argument("--lora_architecture", type=str,
                         choices=[
