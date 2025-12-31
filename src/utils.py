@@ -184,6 +184,7 @@ def read_complete(filepath):
     try:
         with open(filepath, "r") as fin:
             data = json.load(fin)
+        # print(data)
         return data, len(data)
     except:
         return [], 0

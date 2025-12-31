@@ -5,7 +5,8 @@ import json
 from typing import Dict, List, Tuple
 from pathlib import Path
 import torch.nn as nn
-
+import logging
+logger = logging.getLogger(__name__)
 
 def move_batch_to_device(batch: dict, device: torch.device) -> dict:
     out = {}
@@ -82,13 +83,13 @@ def load_injected_adapters(model, load_dir: str, strict: bool = False):
     missing_custom = [k for k in incompatible.missing_keys if ".custom_lora." in k]
     unexpected_custom = [k for k in incompatible.unexpected_keys if ".custom_lora." in k]
     if missing_custom or unexpected_custom:
-        print("[warn] Incompatible custom adapter keys:")
+        logger.debug("[warn] Incompatible custom adapter keys:")
         if missing_custom:
-            print("  missing (custom):", missing_custom[:20], "..." if len(missing_custom) > 20 else "")
+            logger.debug("  missing (custom):", missing_custom[:20], "..." if len(missing_custom) > 20 else "")
         if unexpected_custom:
-            print("  unexpected (custom):", unexpected_custom[:20], "..." if len(unexpected_custom) > 20 else "")
+            logger.debug("  unexpected (custom):", unexpected_custom[:20], "..." if len(unexpected_custom) > 20 else "")
     else:
-        print("[ok] Loaded adapter tensors cleanly.")
+        logger.debug("[ok] Loaded adapter tensors cleanly.")
 
     return incompatible
 

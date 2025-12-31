@@ -71,8 +71,7 @@ def main(args):
             
             if need_post_train(args, trained_adapter_dir=trained_adapter_dir):            
                 model, tokenizer, generation_config = get_model(
-                    args.model_name,
-                    max_new_tokens = args.max_new_tokens,
+                    args.model_name
                 )
                 inject_hydra_lora(model, trained_data_adapters_dir=trained_adapter_dir, r=args.lora_rank, alpha=args.lora_alpha, target_modules=TARGET_MODULES, architecture=args.lora_architecture)
                 torch.cuda.empty_cache()
@@ -87,7 +86,6 @@ if __name__ == "__main__":
 
     # ---- existing args ----
     parser.add_argument("--model_name", type=str, default="qwen2.5-1.5b-instruct")
-    parser.add_argument("--max_new_tokens", type=int, default=20)
     parser.add_argument("--dataset", type=str, default="popqa")
     parser.add_argument("--data_type", type=str)
     parser.add_argument("--with_cot", action="store_true")
