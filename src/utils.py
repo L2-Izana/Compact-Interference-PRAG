@@ -76,9 +76,13 @@ class BaseDataset:
         return final_metric
 
 
-def load_data(data_name, data_type, model_name):
+def load_data(data_name, data_type, model_name, topk=None):
     solve_dataset = []
-    input_dir = os.path.join(DATA_ROOT_DIR, data_name, model_name)
+    if not topk:
+        input_dir = os.path.join(DATA_ROOT_DIR, data_name, model_name)
+    else:
+        input_dir = os.path.join(DATA_ROOT_DIR, "bulk" if topk != 3 else "", data_name, model_name) # 3 is the default PRAG, no need
+            
     files = [f for f in os.listdir(input_dir)]
 
 

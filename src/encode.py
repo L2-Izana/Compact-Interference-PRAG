@@ -77,7 +77,7 @@ def get_train_data(aug_model, augments, tokenizer, args, do_tokenize=True):
     for aug in augments:
         psg = aug["passage"]
         rew = aug[f"{aug_model}_rewrite"]
-        qas = aug[f"{aug_model}_qa"]
+        qas = aug[f"{aug_model}_qa"][:args.num_qa] # Must be restricted to be ~3 (original PRAG), bulk has 10 
         qpa_cnt = (len(qas) + 1) // 2
         for qid, qa in enumerate(qas):
             if qid < qpa_cnt:
@@ -163,7 +163,7 @@ def train_loraxs(question, augments, args, model, tokenizer, save_path, config=N
 
 
 def main(args):
-    data_list = load_data(args.dataset, args.data_type, args.augment_model)
+    data_list = load_data(args.dataset, args.data_type, args.augment_model, args.topk)
     model, tokenizer, _generation_config = get_model(args.model_name)
     if args.with_cot:
         prompt_template.get_fewshot(args.dataset)
@@ -207,12 +207,13 @@ def main(args):
                 args.dataset,
                 f"lr={args.learning_rate}_epoch={args.num_train_epochs}_{cot_name}",
                 f"aug_model={args.augment_model}",
+                f"topk={args.topk}" if args.topk != 3 else "",
                 filename,
             )
             os.makedirs(output_dir, exist_ok=True)
             fulldata = fulldata if args.sample == -1 else fulldata[:args.sample]
             for did, data in tqdm(enumerate(fulldata), total=len(fulldata)):
-                augment = data["augment"]
+                augment = data["augment"][:args.topk]
                 for pid in range(len(augment)):
                     save_path = os.path.join(output_dir, f"data_{did}", f"passage_{pid}")
                     if os.path.exists(os.path.join(save_path, "adapter_model.safetensors")):
@@ -287,6 +288,8 @@ if __name__ == "__main__":
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
     parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--topk", type=int, default=3, help="Number of documents being encoded")
+    parser.add_argument("--num_qa", default=3, type=int, help="Num of QA pairs used for encoding")
     # LoRA
     parser.add_argument("--lora_rank", type=int, default=None)
     parser.add_argument("--lora_alpha", type=int, default=None)
@@ -295,6 +298,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     assert args.lora_rank and args.lora_alpha, "No config for LoRA"
     if args.augment_model is None:
-        args.augment_model = "qwen2.5-1.5b-instruct" # Due to ablation study, augment model impact is trivial
+        args.augment_model = "qwen2.5-1.5b-instruct" # Due to ablation study in PRAG, augment model impact is trivial
     print(args)
     main(args)
